@@ -1,4 +1,5 @@
 # Distributed Systems
+Note taken from [MIT: Distributed Systems](https://www.youtube.com/channel/UC_7WrbZTCODu1o_kfUMq88g)
 
 ### Why choose distributed systems
 * Parallelism: parallel computation, handle large requests and respond in a short period of time
@@ -65,14 +66,120 @@ Modern distributed cloud services tend to decouple compute from storage and have
 
 In this case, Aurora has 6 replicas, and it has to write to 4 nodes and read from 3 nodes. To reduce the time of Mean Time to Repair, Aurora partitins the database volume into small fixed size segments, currently 10GB in size.
 
+### MapReduce
+* run Map function on each of input file
+* generate value-Key pairs
+* reduce
 
+#### Jobs
+Job contains a lot of tasks (map/reduce)
+example: word counts
+```C++
+map(k, v)
+	split v in to words
+	for each word w:	
+		emit(w, “1”)
 
+reduce(k, v) (vector)
+	emit(len(v))
+```  
 
+Emit would store data in local disk and Reduce emit would write files output to cluster. Inputs and outputs all live in a Network File System such as GFS. Then it read data in parallel and compute at the same time. 
 
+When input 1 comes, MapReduce process has to go off and talk across the network to the correct GFS server or maybe servers that store parts of the inputs and fetch them over the network to the MapReduce. This involves lots of network communication and network throughput becomes the bottleneck. One possible solution: Run GFS server and MapReduce workers on the same machine, GFS server knows which server has the input files and sends the map to that server to compute, then it fetch data from local disks without sending stuff through network. But currently Google does not use it because they assume that networking should be very fast
 
+#### Shuffle
+* collect all same keys
+* which also means transformation from row stores to column stores
+* moving every piece of data across the network
+* movement of the keys to Reduce requires network communication again —> expensive
 
+### Threads
 
+#### Why threads
+* I/O concurrency: one server waiting for reading from disk, other server can do computation
+* Multi-core parallelism 
+* Convenience: master checks slave is alive or not, check periodically
 
+#### Why not Event Driven Programming
+* get I/O concurrency but does not get parallelism
+
+#### Difference between thread and process
+* threads sit in stack, normally the size is serveral KB which is not large
+* process can have multiple threads running inside
+* each process has its own memory
+
+#### Coordination
+* Channels
+* Condition variables
+* Wait group: just count some numbers, it is waiting for a specific number and then finish the process. (Wait for the children to finish and then close it)
+
+### GFS
+
+#### Challenges in Distributed Systems 
+Distributed Systems are designed to shard to different servers in order to get performance, but this also increases faults. The following loop is a challenge in this topic
+* Performance —> sharding
+* Fault —> tolerance
+* Tolerance —> replication
+* Replication —> inconsistency
+* Consistency —> low performance
+
+#### Features of GFS
+* Big, fast
+* Global
+* Sharding
+* Automatic recovery
+* Single data centre
+* Internal use
+* Big sequential access (GB, TB)
+
+#### Master
+Master knows which server holds the chunk. Data is divided into small chunks, normally 64 MB
+
+#### Master Data
+* File name  —> array of chunk handle (non-volatile nv)
+* Handle —> list of chunk servers (the server that holds replicas) (v), including version # (nv), which one is primary (v), lease expiration (v)
+* Log, checkpoint stored in disk and remote machines
+
+#### Read operation
+* Name, offset —> master
+* Master sends Handler, list of Server, cached
+* Chunk —> chunk server
+* Return data to the client
+
+#### Write operation
+Client can read from any chunk server that contains the new data but what about write? It has to have a primary. What if No primary?
+* Find up to date replicas (the version number is same as the one that master knows), if no chunk server has the latest version then master would wait maybe forever
+* Pick primary, secondary
+* Increase version number -> only when a new primary is designated
+* Tell primary, secondary, version number —> lease
+* Mater writes version number to disk
+
+#### Separate data flow from control flow
+To fully utilize network bandwidth, data is pushed linearly aong a chain of chunkservers rather than distributed in some other topology
+* Client asks Master about primary and location of all replicas. If no primary, then Master grants one to be primary
+* Client caches this information for future use
+* Client sends data to all replcias by carefully pick a chain of chunk servers, normally closest first
+* Client recieves acknowledge from all replcias, then sends write requests to primary
+* Primary forwards write requests to secondary
+* Primay replies to Client
+
+Primary picks offset, then all replicas are told to write at offset. If all of them reply "yes", then primary return "success" to clients. Otherwise, primary replies "no" to client. In this case, some clients may or may not append the data successfully so the replicas might have different data now. (Maybe network issue, jut does not get the message back)
+
+--> how to fix this problem: design the system that all backup keeps data in sync
+
+#### Split Brain problem
+It is causes by network partition and this is the hardest problem. Master pings Primary periodically and if it does not receive responses it might be because of networking issue with lost packet. Master would designate a new primary which would result in "split brain" problem.
+
+#### How to solve Split Brain problem
+When master designates a primary it gives it a lease. Master and primary know how long the lease would last. If lease expires, primary knows it is expired, then it would just stop executing and ignore/reject client requests. Master has to wait for previous primary to expire and then designate to a new one. But why not designate to a new primary immediately after Master receives no reponse from Primary. Because client caches the identity of primary for at least a short period of time. The time when master told a client that A is primary, it designated that B is primary. Then client received wrong information
+
+#### Upgrade GFS to a strong consistent system
+* Reduce same requests by duplicate detection
+* Secondary has to execute what primary tells it to do. If secondary does have some permanent problems then primary takes it out of the system and replaces it
+* Multiple phrases in the write. Only append data until master tell them to do so 
+* Primary crashed before share to all clients, but did share to some of the secondaries. New primary must know how to re-synchronizing all the secondaries to keep consistency
+* In situation like secondaries have different data or client has a stale indication from the master of which secondary to talk to, the system either sends all client reads through all the primary
 
 
 
