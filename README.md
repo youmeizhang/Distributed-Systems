@@ -181,8 +181,82 @@ When master designates a primary it gives it a lease. Master and primary know ho
 * Primary crashed before share to all clients, but did share to some of the secondaries. New primary must know how to re-synchronizing all the secondaries to keep consistency
 * In situation like secondaries have different data or client has a stale indication from the master of which secondary to talk to, the system either sends all client reads through all the primary
 
+### RAFT
+One of its features is Majority Vote and elect a leader. If there (2f + 1) servers, then it allows f failures. Any majority  has to be overlapped with previous leader majority, so at least one server has previous term and current term number
 
+#### Process
+* Client sends put requests to application layer in Leader
+* Leader sends it to RAFT layer and says please commit to application log and tells me when it is done. 
+* Raft under Leader server would send Append Entry request to other replicas
+* Each RAFT would send request to local server to execute the request too
+* RAFT sends acknowledge back to leader and the Leader executes the requests
+* Leader sends request back to client
+* When leader realize change is committed, it would send message to other replicas saying that it already committed. Then replicas would execute the operation and apply it to their state
 
+No Client is waiting from replicas execution state, so the time does not matter that much. But leader would keep sending Append Entry to all replicas until they all commit. In the long run, RAFT would make sure that the logs in each replicas are identical. If replicas can not handle requests as quickly as leader, then it would build up uncommitted entries and finally lead to out of memory and fail. So replicas also need to communicate to leader about the state that it is in to avoid having a long backlog
 
+```Java
+Application layer: 
+start(command) (index, term)
 
+RAFT
+Return upwards: applyCh, ApplyMsg(command, index)
+```
 
+#### Leader Election
+why RAFT has a strong leader? To build a more efficient system with a leader. Followers do not need to know about the number of the leader. The term number is enough. Each term, there is at most one leader. For election timer, if it expires, start the election. If no response from leader, then assume it is dead. Then `TERM++` and then request votes by sending RPC to other servers. Usually it takes a few seconds to complete a leader election. 
+
+If a server is voted for a leader, it has to send out append entry to all the servers and let them know because no server is allowed to send append entry unless you are the leader for the term. Then resetting everyone’s election timer. Time is randomly selected in each server. 
+
+Minimum heartbeat: new random number of timer, not the same as previous one
+Maximum heartbeat: can decide how much time it takes for the system to recover
+
+#### How the newly selected leader restore the consistent state in the system? How does it figure out the log?
+What can the log look like after crashes
+```
+   1 2 3 4
+S1 3
+S2 3 3 4
+S3 3 3 5 6
+```
+
+Slot 1 and 2 we can keep because it is from majority of vote, they are committed. But we have to drop slot 4 and 5 to keep the replicas consistent in content. For slot 2, raft can not disapprove that it is committed, then raft can just keep it.  Because it might happen when the leader sent out the requests and crash, so it does not execute the append entry, neither for other replicas.
+
+S3 is selected as a new leader for term 6. Then prevLogIndex = 3, prevLogTerm = 5. nextIndex[s2] = 3, nexIndex[s1] = 3
+`New Leader initializes all nextIndex values to the index just after the last one in its log. If a follower's log is inconsistent with the leader's, the AE consistency check will fail in the next AE RPC. After a rejection, the leader decrements nextIndex and retries the AE RPC. Eventually nextIndex will reach a point where the leader and follower logs match`
+
+Why it is ok to drop log for term 4, because there is no reason to believe that it is executed or even received by any server. It is never executed. 
+
+#### Why not longest log as leader
+If you vote a leader, you are supposed to record the term in persistent storage 
+```
+S1 5 6 7
+S2 5 8
+S3 5 8
+```
+Term 8 is likely to be committed, if we choose s1 to be the leader, 8 would be dropped
+
+#### Election restriction
+Vote `yes` only if candidate has a higher term in last entry, or same last term, >= log len 
+
+#### Append entry reply
+* XTerm: term of conflicting entry
+* XIndex: index of the first entry with XTerm
+* XLen: length of log
+
+#### Others
+Persistent: writing to the disk. Writing any file to the disk takes about 10ms which is very expensive
+Log: only record of the application state , so to reconstruct the application state after reboot
+CurrentTerm: 
+VotedFor
+
+#### Synchronous disk update
+* write(fd, —): you don’t know if it writes successfully to the disk or not
+* fsync(fd): only by calling this you know that, but that is expensive
+
+#### Log compaction and snapshots
+* Application state might be smaller than the log entries
+* Snapshot is just a table + log index —> can remove the log entry before that log index then
+
+#### Linearizability 
+Execution history is linearizable if exists order of the operations in the history that matches real-time for non-concurrent requests. Each read sees most recent write in the order
