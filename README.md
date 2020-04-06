@@ -260,3 +260,125 @@ VotedFor
 
 #### Linearizability 
 Execution history is linearizable if exists order of the operations in the history that matches real-time for non-concurrent requests. Each read sees most recent write in the order
+
+### Zookeeper
+* Api general purpose coordination service
+* Nx —> Nx performance
+* Mini-transaction
+
+#### Leader
+There is a zab layer inside each server which is very similar to RAFT. However, in RAFT, leader is responsible for handling all the requests from clients and forward them to all other followers. In this case, leader becomes the bottleneck when increasing the number of servers. Therefore more servers means it is slower
+
+A solution is to send requests to leader and read requests to replicas servers. But is data up-to-date? The server handling read requests might not be in the majority, it might not see the write requests. Even though it sees it,  it might miss the commit command. Therefore we can not play this game! linearizability forbids us from doing this
+
+How zookeeper does this? Zookeeper doesn’t guarantee consistency. It does not say I am going to return the up-to-date data to you 
+
+#### Zookpper Guarantees
+* linearizable writes
+* FIFO client oder
+    * writes — client specified order
+    * reads — when replicas append entries, leader would send them zxid as well. Client reads the data, replicas would send back the information with zxid and when it switches servers because previous one failed, then it is still able to see exactly the same position with same zxid
+    
+So, in Zookeeper, if I write the data and read it in order, then I am able to see the latest data but if you write the data and I read, then I might need to wait sometime so I can see the latest data. It is not guaranteed
+
+```
+Write order
+	delete("ready")
+	write f1
+	write f2
+	create("ready")
+	(Read request client sent to server)
+				exist("ready") —> if true
+				read f1
+				read f2
+```
+If `exist("ready")` returns true, then we know the read sort of monotonically move forward in time to the log, so read f1 can read successfully. In Zookeeper, you can set `exists(ready, watch = true)` which means if there is any change, please send me the notification. It is guaranteed to see this notification before executing the following commands 
+
+#### Motivation (Application)
+* Test-and-set server
+* config info: publish configuration files for other servers to use
+* Master elect
+* MapReduce as well, you write your map function and other server takes it
+
+#### Z nodes
+* regular
+* ephemeral
+* sequential
+
+```
+# APIs
+create(path, data, flags)
+ (exclusive)
+delete(path, Version)
+exists(path, watch)
+getdata(path, watch)
+setdata(path, new data, version) 
+list(d)
+```
+Even though Zookeeper does not guarantee that client sees the latest data, the APIs provided are able to make sure the data is up-to-date 
+
+```
+x = get(key)
+set(key, x+1)
+```
+
+This is a problem in zookeeper because it is not atomic the get data might be stale data. Instead, we can do following
+
+```
+While true:
+	x, v = getData("f")
+	if setData("f", x+1, v)
+		break
+```
+`setData` makes sure that the version it gets is exactly the same as the version known in Leader. Because write data would only go to leader and set the data only if the version `v` matches the version remember in Leader. While loop is not guaranteed to finish, but in real life since Leader would push other replicas to have same data as it so it is likely that this would finish. However, this is disastrous when there are high consistent load of writes then maybe the first one would succeeds and others fail. This is known as `Herd Effect`, second locking would fix this
+
+#### Using locks
+```
+Acquire (create lock on file "f")
+1. If create("f", ephemeral=T) return
+2. If exists("f", watch=T) 
+3.     Wait
+4. Go to 1
+```
+What if lock is released between create and exist? That is why there is step 4 it needs to go back and check again. This would also cause Herd Effect, because only the first one would get the lock and all others are waiting for the same lock (non-scalable lock)
+
+```
+Lock without herd effect
+Acquire
+1. Create sequential "f" (it has a file number such as f27, ephemeral file)
+2. List f*
+3. If no lower number file, return
+4. If exists (next lower number, watch =T)
+5.    Wait
+6. Go to 2
+```
+Since we guarantee the number of files is ascending `Never` descending, so why do we need to list f* again? Why not just -1. Because file is ephemeral, then it might die and we need to wait for previous file instead. 
+
+Why this does not suffer from Herd Effect? Even though thousands of clients are trying to create the file, each time, only one file is waiting for a lock while in previous one, every client sends RPC requests to zookeeper. (scalable lock)
+
+Good thing is that the next client who gets the locks need to have a way to clean up the previous stale data. For example, if previous MapReduce job didn’t finish executing a command, then the next client can re-execute it. (soft lock) This method can be used to elect a master
+
+In go, you can not tell the order the threads execution with a flag at the end of each thread. It can only tell the order if you have before and then relationship. That means it is very hard to recover when a thread holding a lock crashed. But this scalable lock is possible to do so
+
+### CRAQ
+Basic idea is: Chain Replication —> increase read throughput while preserving linearizability
+
+#### head and tail servers
+Write requests are sent to Head and then Head passes the request down to the chain and when it reaches the tail, tail sends back response to Head. If head failed, the next node would take over as a head. If head crashes without forwarding write requests ahead and then no commits and client would not get acknowledge. Same for tail. Immediate node failed then need to take it off the chain
+
+#### Difference between RAFT and CRAQ
+* Raft Leader would handle more loads with increasing clients since it needs to send requests to all other replicas while in CRAQ, only the Head forward once to the next node
+* Raft Leader sees every request from the client while CRAQ splits it by having head and tail
+
+#### Config Manager
+Does not have proof for split brain and network partition. Therefore it introduces Config Manager. Whenever there is failure in servers, it would send out new configuration about the chain, who is Head and Tail. Under Head and Tail, they might be Raft, Paxos, zookeeper which is fault tolerance and does not suffer from split brain
+
+But chain replication is not resistant to transient slowdown for example one server is upgrading software or so it does not process the request and forward it to next server quick enough
+
+Raft or Paxos is good when the replication might be very far away from each other, then it only needs to wait for acknowledgement from the majority instead of all of them. So it really depends on what goals are you trying to achieve
+
+### Frangipani
+* caching coherence
+* distributed transactions
+* distributed crash recovery
+
