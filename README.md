@@ -6,12 +6,12 @@ Note taken from [MIT: Distributed Systems](https://www.youtube.com/channel/UC_7W
 * Fault tolerance: availability and recoverability. keep a server available despite of any kind of failure. For example a single computer goes down for whatever reasons (such as outage, flooding), other servers can still respond.
 * Security / Isolated: data is not stored in a single server. Independent failure
 
-### Problems
+#### Problems
 * Concurrency: 
 * Partial failure
 * Performance: scalability
 
-### Infrastructure
+#### Infrastructure
 * Storage
 * Computation
 * Communication
