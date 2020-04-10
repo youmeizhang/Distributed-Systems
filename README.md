@@ -382,3 +382,164 @@ Raft or Paxos is good when the replication might be very far away from each othe
 * distributed transactions
 * distributed crash recovery
 
+```
+U1 WS1 (VI, CC —> frangipani)
+U2 WS2
+U3 WS3
+```
+System operations happen just locally in the ws which increases scalability. Petal (shared disk drive —> virtual disk) which  comes as pairs
+
+#### Challenges <— caching, decentralized
+* Cache coherence
+* Atomicity
+* Crash recovery
+
+Cache coherence: use of locks as drive, cache the latest data
+
+#### Rules
+```
+# Lock server table
+file | lock owner
+X         ws1
+Y         ws1
+```
+
+```
+# Ws frangipani table 
+File | lock | content
+x      busy      …
+Y      idle      …
+```
+
+* No cache data without a lock that protects the data
+* Acquire a lock and read from petal
+* Write data to petal after getting acknowledge from petal then release the lock
+
+#### Coherence protocol
+* Request: ws —> lock server
+* Grant: lock server —> ws
+* Revoke: lock server —> ws (asking ws to give the lock which might be in idle state so other ws can use it). Then it would first write dirty data to Petal and then send back message to lock server saying giving up the lock
+* Release: ws —> ls (but if ws is busy with renaming or other operation, then it would finish it first and then transform to idle state)
+
+```
+ws1 		ls		ws2
+Acquire lock z from ls
+ls grant lock z to ws1
+Read file z from Petal
+
+ws2 acquires lock z
+ls sends revoke message to ws1
+ws1 writes z back to Petal
+ws1 sends release back to lock server
+lock server sends grant to ws2
+ws2 reads file z from petal
+```
+
+#### Optimization
+* Lock is not released immediately after they turn into idle because it is possible that no one read from the file but instead it would write to the data frequently
+* Read-only locks: invoke everyone’s lock and then you are allowed to write to the data
+
+#### Atomic multi-step operations
+* Transactions —> distributed transaction system
+* Acquire all the locks for the operation
+	* All updates
+	* Write to patal
+* Release (Purpose here is to make sure no one can read from this while ws is writing)
+
+#### Crash recovery
+Crash with lock
+* Write-ahead logging (wal)
+ * Per-ws logs
+ * logs stored in Petal
+
+* Log entry
+ * Log sequence number: when ws crashes, it can scan through the log and if there is no increasing anymore, then it knows the highest LSN as the last log entry (Block number, Version number, Data...)
+ 
+ 
+* On revoke (z)
+ * Write entire log —> Petal, then 
+ * Write modified blocks for lock (z), then
+ * Send release
+ 
+```
+Ws1: delete(d/f) (v3)		crash
+Ws2: 		create(d/f)(v4)
+Ws3: 					recover
+```
+When ws3 recovers and replay the log for ws1, the delete might still there, and then ws3 deletes the files which is wrong because it is deleting the file that was created by ws2. Therefore can not simply replay ws1 logs. It would need to check the version number in the stored in the petal and if the log version number is larger than the one stored in petal then it just ignore it
+
+### Distributed transaction
+* Concurrency control —> serializability
+* Atomic commit —> transaction
+```
+x=10, y=10
+T1:
+begin_x
+	add(x, 1)
+	add(y, -1)
+End_x
+
+T2:
+Begin_x
+	t1 = get(x)
+	t3 = get(y)
+	print t1, t2
+end_x
+```
+Serializable if exists serial order of execution of transactions that yields same results
+
+#### Concurrency control
+* Pessimistic —> two-phrase locking
+* Optimistic  —> directly do what you need to do and the later check if there is any conflict? If so, the abort it and retry (OCC) if conflict is not frequent, then you can try this
+
+#### Two-phrase locking
+* Acquire lock before using record
+* Hold until done —> why waiting all of them to finish first? Bad for performance but good for accuracy —> in this case, it forces the serial order
+
+```
+T1
+get(x)
+get(y)
+
+T2 
+get(y)
+get(x)
+```
+Dead lock. Distributed transactions vs failures —> atomicity vs failures (All-or-none)
+
+#### Two-phrase commit
+TC-Transaction Coordinator
+```
+	S1 X
+TC
+	S2 Y	
+
+Trans ID —> TID
+TC		A		B
+```
+TC sends get or put and other requests first. The it needs to release the lock and let the data become visible to outside world perhaps a client is waiting for reply. Then TC sends PREPARE requests to participants and waiting for yes or no response from them. If all they say yes then it sends out the commit message to each participant. Then participants send the acknowledgement. As long as a single participant says no or there is failure, then it would not commit and send the abort request. So, as long as participant sees commit / abort, it would unlock
+
+B might crash before sending yes message back, TC still waits for it, so B is entitled to unilaterally abort the transaction itself
+
+B crashes after sending yes message but before getting the commit message. Before it sends yes message back it mush write to disk in its log all the info required to commit the transaction. So when it recovers, it restarts and look at its log and complete the transaction and restore that state
+
+TC crashes before sending commit message. Before sending commits it must write the log/outcome to the disk as well. When it crashes, its recovery would see the log and resend the commit messages to all participants, so participants need to be prepared to receive duplicated commit message
+
+#### Message lost in the network
+Send out another one but we don’t want to sit there and wait with lock held, then it unilaterally decide to abort the transaction
+
+For participant times out in prepare, then it is allowed to abort and thereby release the lock. If it is waiting for commit message, but it can not abort the transaction after replying yes and just waiting for the commit message. If it times out waiting for commits, it must keep waiting maybe indefinitely. And it can not unilaterally commit the message as well —> BLOCK
+
+After participant commits the message it would forget about it and if TC didn’t receive acknowledge from them TC would resend a new one, but participant already forgot about it, so it sends another message saying there is one unknown commitment and it must be that one
+
+Two-phrase commit is used in sharing databases where they split up data in multiple servers. If the system does not allow multi-record transaction then it does not need this. Evil reputation: multiple rounds of message, lots of disk writes and wait for it to finish (10ms) (100 transaction/second) It is not used in separated organization because of the block issue
+
+Similar to RAFT, but they solve very different problems. RAFT gets high availability by replicating data on multiple peers and can operate even though some of them fail. Two-phrase commit, each participant does different things and they all need to do their part, so it does not help with availability 
+
+#### Combined system?
+3 clusters
+```
+TC: s1, s2, s3 —> RAFT
+A: s4, s5, s6 —> RAFT
+B: s7, s8, s9 —> RAFT
+```
