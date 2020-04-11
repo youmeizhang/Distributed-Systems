@@ -543,3 +543,64 @@ TC: s1, s2, s3 —> RAFT
 A: s4, s5, s6 —> RAFT
 B: s7, s8, s9 —> RAFT
 ```
+
+### Google Spanner
+* Run two-phrase commit but run it over Paxos replicated participants in order to avoid the problem of crashed coordinator blocking everyone
+* Synchronized time have efficient read-only transaction
+
+```
+DC1 			DC2 			DC3
+shard A			copy A			copy A 		—> this shard forms one Paxos group
+shard B			copy B			copy B
+
+
+ccc			ccc			ccc
+```
+Each paxos group has a leader. It reads from local data centre, but might read out-of-date data from some shards since Paxos depends on majority voting
+
+#### Read/write transaction
+```
+BEGIN
+	X=X+1
+	Y=Y-1
+END
+```
+
+```
+DC1 			DC2 			DC3
+X 			X (leader)		X  
+Y(leader)		Y 			Y
+```
+Assume X Y in different shards. 
+* Read data first, so send read request to X leader and it sets a lock on it
+* Leader of that shard sends response back to client
+* Client sends read request to Y and lock it
+* Y send back response
+* Client is going to do the write action (transaction coordinator let's say leader of Y is the coordinator for this transaction)
+* Client sends writes request to X leader
+* Leader sends prepare request to all replicas and get the majority message saying yes
+* It sends response to coordinator
+Client sends write request to Y leader and leader sends prepare message and send response to coordinator saying yes then coordinator can commit and sends out Paxos followers commit message. Then leader release the locks
+
+Coordinator manager itself is a Paxos replicated state machine, so if Y (leader) failed, other Y replicas can take over and become a transaction manager, each of them have the logs. Huge amount of messages in this design, slow 
+
+#### Read-only transaction
+* Serializable: fix read-only transaction between read/write transaction
+* External consistency
+
+#### Why not read latest value?
+```
+BEGIN
+	PRINT(X, Y)
+END
+```
+
+```
+T1: wx wy c
+
+T2: 			wx wy c
+
+T3		rx			ry	
+
+```
+In this case, the read is not correct
