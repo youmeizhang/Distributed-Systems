@@ -604,3 +604,158 @@ T3		rx			ry
 
 ```
 In this case, the read is not correct
+
+#### Snapshot isolation  —> works r/o transaction
+Timestamp
+	r/w: TS = commit time
+	r/o: TS = start time
+This is more like a multi-version database which will store the timestamp
+```
+T1@10: wx wy c
+
+T2@20: 			wx wy c
+
+T3@15:		rx=9			ry=11
+
+```
+```
+Database
+x@10 = 9
+y@10 = 11
+
+x@20 = 8
+y@20 = 12
+```
+When execute `ry` we know the timestamp is `@15`, so it looks at any record with timestamp that is lower than 15, T1 —> T3 —> T2: serial order
+
+#### Why is it ok to read stale data for y
+Concurrent for T2 and T3, it is ok to have either order. But since we store so much information in the database and it would blow up storage. But it will discard old records
+ 
+
+#### Time sync
+What is the impact on snapshot isolation if clocks are not synced?
+* R/o transaction’s TS too large
+    * Correct but slow
+* R/o transaction’s TS too small
+    * Miss recent write, not external consistency
+
+Broadcast time from government lab such as GPS
+
+Clock sync
+UTC —> GPS satellites —> GPS receiver in each data centre 
+
+Each data centre there will be GPS receiver, and each server sends request to GPS receiver to get the time. We don’t know how much time it takes to propagate from GPS to data centre. Communication between master and slaves also need to be considered . Which adds uncertainty
+
+True Time Scheme 
+* TT interval = [EARLIEST, LATEST]
+```
+Strat rule
+	TS = TT.now().latest
+	r/o - assign that time to start
+	r/w - assign that time to commit
+Commit wait - r/w transaction
+	delay TS < TS.now().earliest —> when the commit finish, it is guaranteed to be in the past
+```
+
+```
+T0@1:	wx1 c
+
+T1@10			 wx2    p 	 c [11, 20]
+
+T2@12						Rx?
+```
+wx2 and p get a timestamp with Earliest and latest [1, 10], it would not commit but it would keep asking what time is it until it receives a time that is for example [11, 20] which larger and this would make sure that the commit is guaranteed to be in the past
+
+Rx asks for a time [10, 12] which includes 11, then it would choose 12 latest as time stamp
+This is how spanner enforces external consistency
+
+### Optimistic concurrency control
+FARM, OCC (fast remote memory) \
+RDMA (remote direct memory access)
+
+Concerns for Spanner: speed of light and network delays between data centres \
+Concerns for FARM: CPU time on the servers because they washed away the speed of light and network delays by putting all the replicas in the same data centre
+
+Zookeeper + configuration manager
+```
+	Primary1, Backup1
+	Primary2, Backup2
+
+        Ccc	   ccc
+```
+Not a Paxos, so only need 1 replica living not majority. Clients also act as transaction coordinator for two-phrase commit
+
+#### Performance
+* sharding
+* Data fit into RAM —> read quickly but fail with power failure
+* NVRAM (non-volatile RAM)
+* RDMA —> read / write from the server without interrupting the server
+* Kernel Bypass
+
+Non-volatile RAM —> good for power failure but not other crashes
+
+For battery system when it sees the main power is failed, the battery system while keeps the servers running also alert all the servers with some kind of interrupts or message. Then the software on FARM servers stop all processing for FARM and then each server copies all of its RAM to a SSD attached to that server (a couple minutes). So when the power gets back the machine can read the logs stored in RAM and recover
+
+#### Network - traditional
+```
+APP					APP			
+———			       		———
+(Kernel)	
+Socket layer		
+buffering				buffer
+TCP					TCP
+NIC driver				driver
+
+———
+NIC			—> 		NIC	
+```
+Network is quite slow and it is hard to increase it to process a few more hundreds of RPC messages per second. The cable runs  like 10GB / second which is hard to write our PC software that can generate small messages of the kind that db often needs to use
+
+#### Kernel bypass - DPDK
+Application layer read/write data to NIC directly and not interrupt the kernel
+
+RDMA
+```
+src					dst
+———			       ———
+APP					APP			
+———			       ———
+					one-sided
+					RDMA
+———
+RMDA NIC	—> 		RMDA NIC	
+```
+Directly read / write from src to app in dst and it does not know the read or write, but NIC is going to process it. So RDMA requires Kernel Bypass \
+10 millions small RMDA / second \
+5 microseconds for read and write \
+All these involve software in the server and help client to get read and write
+
+#### How to lock? —> use optimistic concurrency control
+Pessimistic
+* Locks —> 2 pl
+* Conflicts —> blocks
+
+Optimistic
+* Read without lock <— one-sided RDMA super fast because later we will validate
+* Buffer writes locally 
+* Commit —> validation 
+* Conflicts —> abort
+
+#### FARM API
+```
+ txCreate()
+o = txRead(OID) —> call relevant servers
+o.f += 1
+txWrite(OID, o)
+Ok = txCommit()
+```
+More like a no sql database
+
+OID: region number, address
+
+Server Memory Layout
+Region
+Object
+* lock bit
+* versions
+
