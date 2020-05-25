@@ -759,3 +759,164 @@ Object
 * lock bit
 * versions
 
+### Memcached at Facebook
+Hash table
+When write to DB, it will delete(k) in memcache —> why not just update it?
+```
+# Example
+C1: x = 1 —> DB
+
+				C2: x = 2 —> DB
+				C2: set(x, 2)
+
+C1: set(x, 1)
+```
+If we just send set RPC then it is likely that we leave stale data in the memcache as shown in this example
+
+#### PERFORMANCE
+* Partition
+    * + RAM efficient
+    * - not good for hot keys
+    * - Clients talk to every partition
+* Replication
+    * + good if the problem is hot keys
+    * + Few TCP connections
+    *  - less total data
+
+FE reads from the closest memcache server in the same regions. Have clusters inside one region, so limit the expense of network communicating
+
+
+#### Regional pool
+For those data that are not accessed that often, they are moved to regional pool memcache instead
+
+#### Cold start (when a new cluster is added)
+No data in memcache, then FE reads data from another clusters and stores it in local memcache in order to reduce the read request to DB
+
+#### Thundering Herd
+So many FE are reading for same data from the memcache, but at the same time, there is one FE write that same key to DB and delete it from memcache, then all those FEs are going to send requests to DB 
+
+#### LEASE
+The first FE that asks for a data that is missing in the memcache, memcache would send response back saying no data and then install a lease (number) and also send this lease token back to the FE. Then other FE would get response asking them to wait. The first FE would go to DB and fetch data and update the memcache 
+
+#### RACE
+```
+C1: get(k) —> miss
+C1: read k from db —> V1
+	C2: writes k = v2 —> DB
+	C2: delete(k)
+C1: set(k, v1)
+```
+
+Solve this problem by using LEASE
+
+``` 
+C1: get(k) —> miss + lease
+C1: read k from db —> V1
+	C2: writes k = v2 —> DB (delete(k))
+	C2: delete(k)
+C1: set(k, v1, lease)
+```
+
+When delete(k), it is going to invalidate the lease as well, so lease is removed. But C1 set still carries the lease and found that there is no lease for that key, so memcache is going to ignore the set request
+
+Even though the delete comes late, set(k, v1, l) gets updated because the lease is still in the memcache, so this request is acceptable. However, when the delete comes, stale data still gets deleted
+
+### COPS, causal consistency
+Straw Man One: Client puts write requests to DC1  and DC1 responses, later it is going to send the same request to other DCs, in this case, it is Eventual Consistency, no order guaranteed though —> all DC end up with storing same value
+
+#### How
+Wall-clock: assign a timestamp when the write request comes so that all DC know if the coming request has smaller timestamp it is not going to update the value
+
+#### Two little problems
+* same timestamp: <1:02, DC1> high bits timestamp
+
+#### LAMPORT Clocks
+Tmax = highest version number seen
+V# = T = max(Tmax + 1, real time)
+
+Conflicting writes: Last-writer-wins policy
+
+#### Straw Man two - Eventual Consistency = Barriers
+sync(k, v#) —> slow
+put(k, v) —> return v#
+
+```
+C1: v# = put(photo), sync(photo, v#), put(list)
+
+C2:                                 get(list), get(photo)
+```
+
+If C2 see the list then C1 must already sync all the data before putting in in the list, so C2 is able to get the photo
+
+Sync is going to block if the DC goes down
+
+(Eventual consistency examples: Dynamo, Cassandra)
+
+### COPS
+```
+				context
+get(X) -> v2			X: V2
+get(Y) -> V4			X: V2 Y: V4
+put(z, -) -> V3
+—> put(z, -, X:V2, Y:V4)
+```
+
+Order information
+
+```
+Dependencies
+Z V3 —> X V2
+Z V3 —> Y V4
+```
+
+If Z V3 is revealed that means X V2 and Y V4 must be revealed. That means when syncing other DC, they need to check if X has a higher version number than V2 and Y has a higher version number than V4 before it can update Z to V3. Otherwise, it needs to hold the update before receiving request for updating X and Y to corresponding versions
+ 
+—> Cascading dependency waiting problem
+
+### Certificate Transparency Equivocation
+
+SSL, TLS, https
+
+“Gmail.com”
+
+Private key (gmail)
+
+They ask Certificate Authority for a certificate and that includes “gmail.com” and the Public key for gmail
+
+So if a hacker service hack into DNS and make users go to your server instead of gmail, your server is still can not get the certificate that gmail has
+
+Can not have a single database to store those certificates to check if the certificate is bogus
+
+#### Certificate Transparency
+```
+CT Log                           < —  cert   —  CA
+(Append those certificates)			|
+     |
+  user   <——CERT——>	   	    gmail.com
+						    monitor (ask for CT log for recent new logs)
+```
+
+* Gmail asks CA and CA returns a Cert
+* CA also sends this Cert to CT Log and appends it to the log
+* A user sends request to gmail.com and gmail.com sends the certificate back
+* The browser asks CT Log if this certificates is valid, if yes, then user can use gmail.com
+* There is a monitor attached to the web, and it asks CT Log frequently for the new logs
+
+Append-only
+No forks / no equivocation
+Untrusted
+
+#### How to do this: Markel Tree
+```
+(Sign Tree Head)
+              h()
+      H()             h()
+h(c1) h(c2) h(c3) h(c4)
+c1       c2      c3      c4
+```
+It is unique, there is no same output for different inputs in the hash
+
+Proof of Inclusion
+
+Fork Attack-Equivocation
+
