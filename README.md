@@ -920,3 +920,25 @@ Proof of Inclusion
 
 Fork Attack-Equivocation
 
+### Spark
+Read the first couple records —> then run map  which is more efficient by processing record by record it does not need to read and store the whole files in the disk
+
+Narrow dependency
+
+In HDFS, it read and map then store data back to HDFS, so Spark eliminate this and improve efficiency
+
+Wide transformation: fetch output from each worker , such as distinct action
+
+#### Fault tolerance
+Spark does not replicate driver machine
+
+Problem with wide transformation
+
+Failed worker - wide dependency
+Since spark does not store the intermediate result (unless you use cache), so if the worker fails, it has to start again and compute. Other workers continue to do other operations which mean they don’t have previous transformation result anymore. So instead of only recover the failed worker, we might end up with restarting every worker
+
+Because of this, spark would allow periodic checkpoints in a specific transform and safe result to HDFS periodically. HDFS is fault tolerance 
+
+If they want to only recover the failed worker, then it means the computation needs to be deterministic and RDD is immutable. However, lets say you fetch data from distributed system then the data is mutable and it is hard to make the transformation non-deterministic 
+
+So spark is really for big data and offline but not online processing
